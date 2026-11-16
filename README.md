@@ -1,290 +1,177 @@
-<!-- managed-by: vgi-starters (edit upstream in shared/README.md.tmpl, then run tools/render.py) -->
 <p align="center">
   <img src="https://query.farm/media-kit/products/vgi/vgi-logo.png" alt="Vector Gateway Interface (VGI)" width="320">
 </p>
 
-<p align="center"><em>A Query.Farm VGI worker for DuckDB, written in Python.</em></p>
+# US Occupational Wages by Metro, State and Occupation in DuckDB
 
-# VGI UsWages Worker — Python
+> **vgi-us-wages** · a [Query.Farm](https://query.farm) VGI worker
 
-[![CI](https://github.com/Query-farm/vgi-us-wages/actions/workflows/ci.yml/badge.svg)](https://github.com/Query-farm/vgi-us-wages/actions/workflows/ci.yml)
 [![vgi worker: query.farm](https://query.farm/media-kit/shields/vgi-worker.svg)](https://query.farm)
 
-[VGI](https://query.farm/vgi) lets DuckDB call functions that live in a separate
-process: your code, in any language, exposed as ordinary SQL. This worker adds
-three example functions that you rename and replace with your own:
-
-| Function | Kind | Shows you how to |
-|---|---|---|
-| `greet(name)` / `greet(name, style)` | scalar | vectorize over a column, overload, constrain a constant |
-| `sequence_table(count, step := 1)` | table | stream rows in batches, take named arguments |
-| `fetch_items(base_url, page_size := 100)` | table | page through a REST API, retry, read a secret |
-
-
-## Quick start
-
-**Prerequisites:** Python 3.13+ and [uv](https://docs.astral.sh/uv/) (it runs the SQL
-test runner and the metadata checker).
-
-```bash
-make build
-```
-
-Then open DuckDB 2.0 or [Haybarn](https://query.farm/products/haybarn) and attach the
-worker. `LOCATION` is the command DuckDB runs to start it; use an absolute path,
-because a relative one resolves against DuckDB's working directory.
-
-**DuckDB 2.0:**
+Employment and pay for about 830 occupations across the United States, every state and
+territory, about 390 metropolitan areas and 140 nonmetropolitan areas, straight from the
+Bureau of Labor Statistics [Occupational Employment and Wage Statistics](https://www.bls.gov/oes/)
+(OEWS) survey, as SQL. Add the SOC 2018 occupation hierarchy, a job-title search over
+54,000 O*NET alternate titles, and a ZIP-code-to-metro lookup. No API key.
 
 ```sql
+-- Where do registered nurses earn the most?
+SELECT area_title, a_median, tot_emp
+FROM us_wages.main.wages(occupation := '29-1141', area_type := 'metro')
+WHERE a_median IS NOT NULL
+ORDER BY a_median DESC LIMIT 5;
+
+-- From a job title to a SOC code ...
+SELECT soc_code, soc_title FROM us_wages.main.search_occupations('barista', max_results := 1);
+-- ... to pay in the metro area around a ZIP code (metro-level, not ZIP-level).
+SELECT area_title, estimate_geography, a_pct25, a_median, a_pct75
+FROM us_wages.main.wages_for_zip('78701', '35-3023');
+```
+
+## Install and attach
+
+Requires [uv](https://docs.astral.sh/uv/) and DuckDB 2.0 (or [Haybarn](https://query.farm/products/haybarn) 2.0).
+
+```sql
+-- DuckDB 2.0
 SET allow_extension_repositories = 'allowed';
 CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm WITH PREFIX 'https://duckdb-extensions.query.farm';
 INSTALL vgi FROM query_farm;
 LOAD vgi FROM query_farm;
-ATTACH 'us_wages' (TYPE vgi, LOCATION '/abs/path/to/vgi-us-wages/.venv/bin/vgi-us-wages-worker');
+
+ATTACH 'us_wages' (TYPE vgi,
+  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-us-wages@v0.1.0 vgi-us-wages-worker');
 ```
 
-**Haybarn 2.0** (`uvx haybarn-cli`):
+From a checkout: `make build`, then
+`ATTACH 'us_wages' (TYPE vgi, LOCATION '/abs/path/to/vgi-us-wages/.venv/bin/vgi-us-wages-worker')`.
 
-```sql
-INSTALL vgi FROM community;
-LOAD vgi;
-ATTACH 'us_wages' (TYPE vgi, LOCATION '/abs/path/to/vgi-us-wages/.venv/bin/vgi-us-wages-worker');
-```
+### ATTACH options
 
-Now call the functions:
-
-```sql
-SELECT us_wages.main.greet('Ada');                         -- Hi, Ada!
-SELECT us_wages.main.greet('Ada', 'formal');               -- Good day, Ada.
-SELECT * FROM us_wages.main.sequence_table(5, step := 2) ORDER BY n;
-```
-
-`fetch_items` pages through a REST API. Try it against the public demo API (25 fixed items):
-
-```sql
-SELECT category, count(*) AS items, round(avg(price), 2) AS avg_price
-FROM us_wages.main.fetch_items('https://vgi-starter-api.query-farm.services/v1')
-GROUP BY category ORDER BY category;
-```
-
-If an older cached extension misbehaves, refresh it with `FORCE INSTALL vgi FROM query_farm;`
-(DuckDB) or `FORCE INSTALL vgi FROM community;` (Haybarn).
-
-## Using it in a pipeline
-
-Worker functions compose with everything else in DuckDB:
-
-```sql
--- Materialize an API into a local table.
-CREATE TABLE items AS SELECT * FROM us_wages.main.fetch_items('https://vgi-starter-api.query-farm.services/v1');
-
--- Join it with local files.
-SELECT i.name, i.price, s.units
-FROM items i JOIN 'sales.parquet' s ON s.item_id = i.id;
-
--- Call a scalar per row of another table.
-SELECT customer, us_wages.main.greet(customer, 'formal') FROM read_csv('customers.csv');
-```
-
-## Project layout
-
-```
-src/us_wages_worker/
-  worker.py        # assembles the catalog; add new functions to FUNCTIONS
-  meta.py          # catalog/schema metadata + helpers (object_tags, column)
-  greet.py         # scalar example (overloads, ConstParam choices)
-  sequence.py      # table function example (named args, streaming state)
-  fetch_items.py   # REST API table function (pagination, retries, secrets)
-tests/             # pytest unit tests (in-process client)
-test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
-examples/          # recipes: pushdown, caching, catalog tables, aggregates, COPY …
-ci/                # integration harness used by `make test-sql` and CI
-scripts/           # vgi_template.py (init / template-diff)
-vgi-agent-tests.yaml  # private graders for the agent test tasks
-```
-
-## Adding a function
-
-1. Create `src/us_wages_worker/<name>.py`. Copy the closest example: `greet.py` for a
-   scalar, `sequence.py` for a generator, `fetch_items.py` for an API.
-2. Declare arguments with `Annotated[..., Param(...)]`/`ConstParam(...)` (scalars) or a
-   frozen dataclass of `Annotated[..., Arg(...)]` (table functions). Use `Arg(0, ...)`
-   for positional arguments and `Arg("name", default=...)` for named ones.
-3. Give the class a `class Meta` with `name`, `description`, `tags=object_tags(...)`
-   and `examples`.
-4. Add the class to `FUNCTIONS` in `src/us_wages_worker/worker.py`.
-
-**Which kind of function?**
-
-| You want to… | Use |
-|---|---|
-| compute one value per input row | a **scalar** function |
-| return a set of rows from arguments (an API, a file, a generator) | a **table** function |
-| transform or aggregate the rows of a query | a **table in-out** function or an **aggregate** |
-| expose a fixed dataset by name (`SELECT * FROM us_wages.main.t`) | a **catalog table** |
-| write data out to a file or service | `COPY … TO` with a copy function |
-| accept `INSERT` / `UPDATE` / `DELETE` | a catalog table with insert/update/delete functions |
-
-The [examples/](examples/) folder has a recipe for most of these. Writable tables have no
-recipe:
-
-A writable table is a catalog `Table` that names a table in-out function per operation in
-`insert_function`, `update_function` and `delete_function`, with the richest result each one
-produces in `write_result_modes`. The helpers in `vgi.write_results` (`write_options`,
-`write_result_schema`, `write_result_batch`, `row_id_field`) read DuckDB's `write_options`
-argument and build the result. UPDATE and DELETE need a scan function that emits
-`row_id_field()` and declares projection pushdown. Transactions: override `attach_supports_transactions`
-and `catalog_transaction_begin` / `_commit` / `_rollback` on the catalog. Since VGI protocol 3.3
-a table's scan and write functions are table-only: hidden from `duckdb_functions()` and not
-callable from SQL. Set `expose_scan=True` on the table to keep the scan callable as an ordinary
-table function too (write functions never are). See
-[Writable tables](https://github.com/Query-farm/vgi-python/blob/main/docs/catalog-interface.md#writable-tables)
-in the vgi-python docs.
-
-## Secrets and configuration
-
-`fetch_items` shows the recommended pattern. A bearer token comes from a DuckDB secret
-when one exists, and from an environment variable otherwise:
-
-```sql
-CREATE SECRET (TYPE us_wages_api, TOKEN 'your-token');      -- per session, never logged
-```
-
-```bash
-US_WAGES_API_TOKEN=your-token make run-http                # for servers and containers
-```
-
-Try it: the demo API's `/v1/auth` endpoint needs the published token `demo-token`.
-
-```sql
-SELECT count(*) FROM us_wages.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- fails: HTTP 401
-CREATE SECRET (TYPE us_wages_api, TOKEN 'demo-token');
-SELECT count(*) FROM us_wages.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- 25
-```
-
-Never bake credentials into the image or the source. If a function can't run without
-real credentials, its examples can't execute in CI either. Set `execute: false` on the
-metadata check for that worker (see `.github/workflows/ci.yml`), and add
-`LINT_ARGS ?= --no-execute` to the Makefile so local runs match.
-
-## Testing
-
-```bash
-make test-unit                 # fast Python unit tests
-make test-sql                  # test/sql/*.test through DuckDB (stdio)
-make test-sql TRANSPORT=http   # …over HTTP (also: launch)
-make check                     # everything CI runs
-```
-
-`test/sql/*.test` files are [sqllogictest](https://duckdb.org/docs/stable/dev/sqllogictest/intro)
-scripts. `ci/run-integration.sh` runs them against your worker and fails on any
-unexpected skip, so a broken transport can't hide behind a green run.
-`fetch_items` is tested against `test/mock_api/server.py` so tests are fast and
-offline.
-
-**Testing against real data:** put live tests in their own `.test` file that starts with
-`require-env US_WAGES_LIVE`. They run only when that variable is set. Add the skip reason
-to `EXPECTED_SKIP_REASONS` in CI.
-
-## Metadata and the quality score
-
-DuckDB, agents and documentation tools discover your functions through their metadata:
-titles, descriptions, argument docs, examples and keywords.
-[vgi-lint](https://github.com/Query-farm/vgi-lint-check) checks it, and CI runs it on
-every push. Its settings live in `vgi-lint.toml`, which `make lint-explain`,
-`vgi-lint lint`, and CI all read. This template scores 100/100 with no findings.
-
-```bash
-make lint-explain                              # findings, each with its fix
-make lint-explain LINT_ARGS="--format agent"   # the same, grouped for coding agents
-make lint-ai                                   # optional: an agent must solve vgi-agent-tests.yaml
-```
-
-Each report also states an **assurance level**: how much was actually verified.
-
-| Level | Reached when | Here |
+| Option | Default | Meaning |
 |---|---|---|
-| L1 structural | the static metadata is clean | workers that need real credentials (`execute: false` in CI) |
-| L2 behavioural | the examples also run and return what they claim | **the CI gate** |
-| L3 semantic | an agent solves the worker's own test tasks, and the docs are reviewed | `make lint-ai`, before publishing |
+| `cache_dir` | per-user cache dir (`~/Library/Caches/vgi-us-wages`, `~/.cache/vgi-us-wages`, `%LOCALAPPDATA%\vgi-us-wages`) | Where downloads and their Parquet conversions live (about 17 MB per release) |
+| `base_url` | `https://www.bls.gov` | A mirror, or a local directory laid out like bls.gov (`oes/tables.htm`, `oes/special-requests/oesmYYall.zip`, `oes/area_definitions_mYYYY.xlsx`) |
+| `user_agent` | `vgi-us-wages/0.1 (+https://query.farm)` | BLS asks automated clients to identify themselves, ideally with contact details. If bls.gov answers 403, set your own, e.g. `user_agent 'acme-hr-analytics/1.0 (data@acme.example)'` |
+| `offline` | `false` | Never touch the network; use only the cache |
 
-- **How strict.** Your copy fails on warnings (`fail_on = "warning"` in `vgi-lint.toml`).
-  Raise it to `"info"` before you publish the worker for others.
-- **The linter isn't pinned.** It tracks the current quality bar, so a new rule can flag
-  metadata that passed yesterday. Fix it, or waive the finding.
-- **Waivers.** If a finding is genuinely wrong for your worker, waive it in
-  `vgi-lint.toml` with a `kind` and a `reason`.
-- **Existing workers.** If you're adding this gate to a worker that already has
-  findings, record them with `vgi-lint lint --baseline vgi-lint-baseline --update-baseline`
-  and set `baseline` in `vgi-lint.toml`. After that, only new findings fail.
+## Functions and tables
 
-Metadata lives in `src/us_wages_worker/meta.py` and each function's `class Meta`.
+| Object | What it returns |
+|---|---|
+| `wages(occupation :=, area :=, area_type :=, state :=, industry :=, release :=)` | OEWS rows: employment, mean and 10/25/50/75/90th percentile wages, hourly and annual |
+| `wages_for_zip(zip, occupation, all_areas := false, release :=)` | The **metro or nonmetro area's** figures for the area containing a ZIP, with the area used and the ZIP's land share in it. Never ZIP-level estimates |
+| `areas(release :=)` | Every OEWS area of a release with codes, CBSA, county count and states |
+| `area_counties(release :=)` | County FIPS to OEWS area definitions (May 2024 onward) |
+| `occupations` (table) | SOC 2018 hierarchy: 23 major, 98 minor, 459 broad, 867 detailed, with definitions and O*NET-SOC codes |
+| `search_occupations(text, max_results := 10)` | SOC codes for a job title, over SOC, O*NET titles and O*NET alternate titles |
+| `cache_info` (table) | Provenance of every cached download (URL, SHA-256, ETag, fetch time) and bundled table |
+| `refresh(release := 'latest', force := false)` | Download or re-validate a release in the cache |
 
-## Logging and debugging
+Join keys: SOC codes `VARCHAR 'XX-XXXX'` (`occ_code`, `soc_code`), CBSA codes `VARCHAR(5)`
+(`cbsa_code`), 2-digit state FIPS (`state_fips`) and 5-digit county FIPS (`county_fips`).
+Codes are always `VARCHAR` and keep their leading zeros.
 
-stdout carries the Arrow protocol, so **never print to stdout**. Log to stderr instead.
-Use the standard `logging` module (the SDK routes it to stderr); `--debug` or `--log-level DEBUG` turns it up.
+### Releases
 
-- Under DuckDB (stdio/launch), worker stderr shows up in DuckDB's error messages and
-  terminal.
-- In Docker it goes to `docker logs`.
-- `make debug` runs one query against the worker with debug logging on.
+`release := 'latest'` (the default) finds the newest May reference year on the
+[BLS tables page](https://www.bls.gov/oes/tables.htm) and remembers it for 24 hours;
+`release := '2024'` picks a year. All-data files exist from May 2011; this version was checked
+against May 2019, 2023 and 2025.
 
-## Deploying
+### Pushdown
 
-The same binary serves stdio (DuckDB starts it locally) or HTTP (you host it):
+Everything filters locally against the cached Parquet file, before rows reach DuckDB:
+
+- Named arguments: `occupation` (exact code or prefix like `'15-'`), `area`, `area_type`,
+  `state` (primary state of the area), `industry` (`'cross-industry'` default, `'all'`, or a NAICS code).
+- `WHERE` comparisons, `IN` lists and `IS [NOT] NULL` on `area_code`, `occ_code`, `cbsa_code`,
+  `prim_state`, `o_group`, `naics`, `tot_emp`, wage columns etc. are pushed down; Parquet row
+  groups whose `area_code`/`occ_code` statistics cannot match are skipped. Only the projected
+  columns are returned.
+
+### Markers: suppressed and top-coded values
+
+BLS marks cells instead of publishing numbers. They are never coerced to 0:
+
+| BLS marker | Meaning | Here |
+|---|---|---|
+| `*` | wage estimate not available | `NULL`; column named in `suppressed_columns` |
+| `**` | employment estimate not available | `NULL`; column named in `suppressed_columns` |
+| `#` | wage at or above the top-code | `NULL`; column named in `topcoded_columns`; the threshold is in `topcode_hourly` / `topcode_annual` (May 2023 and May 2025: $115.00/hour, $239,200/year; May 2019: $100.00, $208,000) |
+| `~` | under 0.5% of establishments report the occupation | `pct_rpt` `NULL`, `pct_rpt_below_half` true |
+
+`topcode_hourly` / `topcode_annual` are parsed from each workbook's own notes. Caveat seen in
+May 2025: the notes still state $115.00 / $239,200, yet BLS publishes many values far above that
+(national `a_pct90` up to $972,450) and marks *every* wage column `#` for a few occupations
+(cardiologists, surgeons, chief executives). So for May 2025 a `#` means "BLS withheld it as
+top-coded", and the stated threshold is not a reliable lower bound.
+
+### ZIP codes, ZCTAs and metro areas
+
+OEWS publishes no ZIP-level data. `wages_for_zip` maps a ZIP to the Census 2020
+**ZCTA** of the same code, the ZCTA to counties by land-area overlap, and the counties to the
+release's OEWS area. ZCTAs approximate USPS ZIP codes but are not the same thing: PO-box-only
+and single-organisation ZIPs have no ZCTA (the function errors), and ZIP boundaries change
+after 2020. `zcta_land_share` is a land-area share, not a population share.
+
+OEWS metropolitan area codes are OMB CBSA codes. Two differences to know:
+
+- **New England before May 2024.** Earlier releases (checked: May 2019, May 2023) define New
+  England metro areas as town-based NECTAs (codes `7xxxx`, e.g. `71650` Boston-Cambridge-Nashua).
+  Those rows have `is_necta = true` and `cbsa_code = NULL`. From May 2024 OEWS uses
+  county-based CBSAs everywhere, so `wages_for_zip` and `area_counties` need release 2024 or later.
+- **Connecticut** uses its nine 2022 planning regions (FIPS `09110`-`09190`) as county
+  equivalents. The bundled crosswalk re-expresses the 2020 ZCTA-to-county overlaps through
+  Census's town-to-planning-region crosswalk.
+
+### Cache
+
+The first wage query for a release downloads the BLS all-data zip (about 80 MB) and converts the
+workbook once (about 15 seconds) into a typed Parquet file in `cache_dir`, guarded by a
+cross-process lock. Nothing downloads at import or ATTACH. The occupation hierarchy, search and
+ZIP crosswalk are bundled. `cache_info` lists what is cached; `refresh()` re-checks BLS.
+
+## Data sources and terms
+
+The code license (below) does not cover the data. See [DATA-SOURCES.md](DATA-SOURCES.md) for
+URLs, retrieval dates and checksums.
+
+- **BLS OEWS** estimates and area definitions, and the **SOC 2018** structure and definitions:
+  U.S. Bureau of Labor Statistics, public domain (U.S. government work). Fetched at runtime
+  (OEWS) or bundled (SOC).
+- **O*NET 31.0** occupation data and job titles: bundled under
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution: *This product
+  includes information from the O*NET 31.0 Database by the U.S. Department of Labor,
+  Employment and Training Administration (USDOL/ETA). Used under the CC BY 4.0 license. O*NET®
+  is a trademark of USDOL/ETA.* The worker reshapes the data (columns selected, Parquet).
+- **Census 2020 ZCTA relationship files** and the Connecticut planning-region crosswalk:
+  U.S. Census Bureau, public domain; bundled as a derived ZCTA-to-county table.
+
+Estimates are survey-based and have sampling error (`emp_prse`, `mean_prse`). This worker is not
+affiliated with or endorsed by BLS, the Census Bureau or USDOL/ETA.
+
+## Development
 
 ```bash
-docker build -t weather-worker .
-docker run -p 8000:8000 -e US_WAGES_API_TOKEN=... weather-worker   # health: GET /health
+make check                 # ruff, mypy, pydoclint, pytest, SQL tests over stdio/launch/http, vgi-lint
+make test-unit
+make test-sql TRANSPORT=stdio
 ```
 
-```sql
-ATTACH 'us_wages' (TYPE vgi, LOCATION 'https://workers.example.com/us_wages');
-```
-
-Put hosted workers behind TLS and authentication. See
-[authentication](https://query.farm/vgi/authentication) for bearer tokens and JWTs, and
-[distributing a worker](https://query.farm/vgi/distributing-a-worker) for packaging.
-Pass secrets with `-e` or your platform's secret manager.
-
-## Releasing
-
-Push a tag like `v0.1.0`. The release workflow builds the wheel and sdist, attaches them to the GitHub release, and (if you set the repository variable `PYPI_PUBLISH=true` and configure PyPI Trusted Publishing) publishes to PyPI, so users can run `uvx vgi-us-wages-worker`. Without PyPI, users install straight from the repo with `uvx --from git+https://github.com/Query-farm/vgi-us-wages@v0.1.0 vgi-us-wages-worker`. Every artifact is signed with cosign and
-carries SLSA build provenance. `ci/check-version.sh` makes sure the tag matches the
-version in `pyproject.toml`.
-
-## Using with coding agents
-
-[AGENTS.md](AGENTS.md) is written for AI coding agents (Claude Code reads it via
-`CLAUDE.md`; Codex, Cursor and others read it directly). It covers the commands, the
-recipe for adding a function, the metadata checklist and the sharp edges. A good first
-prompt:
-
-> Read AGENTS.md. Replace `fetch_items` with `forecast(lat DOUBLE, lon DOUBLE)` that calls
-> the Open-Meteo API. Include full metadata, a mock-server test and a `US_WAGES_LIVE` test.
-> You're done when `make check` passes.
-
-## Keeping up with the template
-
-`make template-diff` shows what changed upstream (CI, docs, examples) since your copy was
-made. Your copy records its template version in `.vgi-us_wages.json`.
-
-## Learn more
-
-- [What is VGI?](https://query.farm/vgi) · [Getting started](https://query.farm/vgi/getting-started) · [Building a worker](https://query.farm/vgi/building-a-worker)
-- [Python SDK docs](https://query.farm/vgi/docs/python/): [scalar tutorial](https://query.farm/vgi/docs/python/tutorial/scalar/), [table tutorial](https://query.farm/vgi/docs/python/tutorial/table/)
-- [Distributing a worker](https://query.farm/vgi/distributing-a-worker) · [Choosing a language](https://query.farm/vgi/languages) · [llms.txt](https://query.farm/vgi/llms.txt)
-- SDK source: [vgi-python](https://github.com/Query-farm/vgi-python) · RPC layer: [https://vgi-rpc-python.query.farm](https://vgi-rpc-python.query.farm)
+Tests are offline. `test/fixtures/bls` is a trimmed slice of real OEWS rows (May 2025 and
+May 2023, markers included) plus the real May 2025 area definitions, laid out like bls.gov and
+read through the ordinary `base_url` option. The lint run (`vgi-lint.toml`) uses the same
+fixtures, so it never downloads the full file. Rebuild them with `scripts/make_fixtures.py`;
+rebuild the bundled reference tables with `scripts/build_reference.py`.
 
 ## Support
 
-Open an issue on this repository. For VGI itself, see [query.farm](https://query.farm).
+Open an issue on [GitHub](https://github.com/Query-farm/vgi-us-wages/issues).
 
-## Authorship & license
+## Authorship & License
 
-The starter template is written by [Query.Farm](https://query.farm) and released under
-the [BSD Zero Clause License](LICENSE) (0BSD). Use it for anything, with no attribution
-required. Replace this section with your own license once the code is yours.
+Copyright 2026 Query Farm LLC - https://query.farm
+
+Released under the [BSD Zero Clause License](LICENSE) (0BSD). Data terms are separate; see
+above.

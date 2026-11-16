@@ -1,12 +1,8 @@
-"""Discovery metadata: the one file to edit when you rename or extend the worker.
+"""Discovery metadata for the us_wages catalog.
 
 DuckDB, coding agents and the ``vgi-lint`` metadata checker all read these
-tags. Keep every object documented and ``make lint`` stays at 100.
-
-* Catalog-level tags (title, license, author, links, long description) live in
-  ``CATALOG_TAGS`` below.
-* Every function and table carries ``object_tags(...)``: a title, a category
-  from ``SCHEMA_CATEGORIES``, search keywords, and LLM- and human-facing docs.
+tags. Catalog-level tags live in ``CATALOG_TAGS``; every function carries
+``object_tags(...)``.
 """
 
 from __future__ import annotations
@@ -19,13 +15,14 @@ import pyarrow as pa
 CATALOG_NAME = "us_wages"
 
 SOURCE_URL = "https://github.com/Query-farm/vgi-us-wages"
+OEWS_URL = "https://www.bls.gov/oes/"
+OEWS_TABLES_URL = "https://www.bls.gov/oes/tables.htm"
 
-# Categories group functions in docs and agent tools. Every object's
-# ``vgi.category`` must name one of these.
 SCHEMA_CATEGORIES = [
-    {"name": "text", "title": "Text", "description": "Functions that build or transform strings."},
-    {"name": "generators", "title": "Generators", "description": "Table functions that generate rows."},
-    {"name": "api", "title": "REST APIs", "description": "Table functions that read from HTTP APIs."},
+    {"name": "wages", "title": "Wages", "description": "Employment and pay estimates by occupation and area."},
+    {"name": "geography", "title": "Geography", "description": "OEWS areas, their counties and ZIP lookups."},
+    {"name": "occupations", "title": "Occupations", "description": "SOC 2018 occupation classification and search."},
+    {"name": "cache", "title": "Cache", "description": "Inspect and refresh the local download cache."},
 ]
 
 
@@ -52,80 +49,191 @@ def column(name: str, type_: pa.DataType, comment: str, *, nullable: bool = True
     return pa.field(name, type_, nullable=nullable, metadata={b"comment": comment.encode()})
 
 
+# Terser descriptions for vgi.result_columns_schema, which agent tools cap at 4,000
+# characters; DESCRIBE still shows each column's full comment.
+SHORT_COLUMN_DOCS = {
+    "release_year": "May reference year, e.g. 2025.",
+    "area_code": "'99' US, state FIPS, 5-digit CBSA or 7-digit nonmetro code.",
+    "area_title": "Area name.",
+    "area_type": "1 US, 2 state, 3 territory, 4 metro, 6 nonmetro.",
+    "area_type_name": "national/state/territory/metro/nonmetro.",
+    "prim_state": "Primary state, USPS code.",
+    "state_fips": "2-digit FIPS of prim_state.",
+    "cbsa_code": "CBSA code of metro rows (NULL for NECTAs).",
+    "is_necta": "New England NECTA (pre-2024 releases).",
+    "naics": "NAICS code; '000000' cross-industry.",
+    "naics_title": "Industry title.",
+    "i_group": "Industry level, e.g. cross-industry, sector.",
+    "own_code": "Ownership code; 1235 = all.",
+    "occ_code": "SOC code 'XX-XXXX'.",
+    "occ_title": "Occupation title.",
+    "o_group": "total/major/minor/broad/detailed.",
+    "tot_emp": "Employment (excl. self-employed).",
+    "emp_prse": "Employment RSE, %.",
+    "jobs_1000": "Jobs per 1,000 in the area.",
+    "loc_quotient": "Location quotient vs US.",
+    "h_mean": "Mean hourly wage, USD.",
+    "a_mean": "Mean annual wage, USD.",
+    "mean_prse": "Mean wage RSE, %.",
+    "annual_only": "Only annual wages published.",
+    "hourly_only": "Only hourly wages published.",
+    "suppressed_columns": "Columns BLS marked * / ** (NULL here).",
+    "topcoded_columns": "Columns BLS top-coded # (NULL here).",
+    "topcode_hourly": "Hourly top-code threshold.",
+    "topcode_annual": "Annual top-code threshold.",
+    "pct_total": "% of industry employment.",
+    "pct_rpt": "% of establishments reporting.",
+    "pct_rpt_below_half": "pct_rpt was ~ (<0.5%).",
+    "estimate_geography": "Which area the figures describe (never the ZIP).",
+    "zcta_land_share": "Share of the ZCTA's land in this area.",
+    "is_primary_area": "Area holding most of the ZCTA.",
+    "counties": "County FIPS of the ZCTA in this area.",
+    "zip": "ZIP code asked about.",
+}
+for _p in ("10", "25", "75", "90"):
+    SHORT_COLUMN_DOCS[f"h_pct{_p}"] = f"Hourly wage, {_p}th percentile."
+    SHORT_COLUMN_DOCS[f"a_pct{_p}"] = f"Annual wage, {_p}th percentile."
+SHORT_COLUMN_DOCS["h_median"] = "Median hourly wage."
+SHORT_COLUMN_DOCS["a_median"] = "Median annual wage."
+
+
+def result_columns(schema: pa.Schema, *, short: bool = False) -> str:
+    """``vgi.result_columns_schema`` JSON from an Arrow schema built with `column`."""
+    duck = {
+        pa.string(): "VARCHAR",
+        pa.int8(): "TINYINT",
+        pa.int16(): "SMALLINT",
+        pa.int32(): "INTEGER",
+        pa.int64(): "BIGINT",
+        pa.float64(): "DOUBLE",
+        pa.bool_(): "BOOLEAN",
+        pa.list_(pa.string()): "VARCHAR[]",
+        pa.timestamp("us", tz="UTC"): "TIMESTAMP WITH TIME ZONE",
+    }
+    out = []
+    for f in schema:
+        comment = (f.metadata or {}).get(b"comment", b"").decode()
+        if short:
+            comment = SHORT_COLUMN_DOCS.get(f.name, comment)
+        out.append({"name": f.name, "type": duck[f.type], "description": comment})
+    return json.dumps(out, separators=(",", ":")) if short else json.dumps(out)
+
+
+CATALOG_COMMENT = (
+    "US employment and wages by occupation for the nation, states, metro and nonmetro areas from the BLS "
+    "Occupational Employment and Wage Statistics (OEWS) survey, with the SOC 2018 occupation classification, "
+    "occupation search and a ZIP-to-metro lookup. No API key needed."
+)
+
 CATALOG_DOC_LLM = (
-    "An example VGI worker generated from the Query.Farm starter template. It shows the three "
-    "shapes most workers need: a vectorized scalar function with an overload, a deterministic "
-    "table function with a named default argument, and a table function that pages through a REST "
-    "API with retries and an optional bearer token taken from a DuckDB secret or an environment "
-    "variable. Replace them with your own functions; keep the metadata complete so agents can "
-    "discover and call them."
+    "US occupational employment and wage estimates from the Bureau of Labor Statistics OEWS program "
+    "(https://www.bls.gov/oes/), one row per occupation x area x industry, for each May reference year "
+    "(release). Wages are in US dollars: mean, median and 10th/25th/75th/90th percentiles, hourly (h_*) and "
+    "annual (a_*). Areas: the US ('99'), states and territories (2-digit FIPS), metropolitan areas (5-digit "
+    "CBSA codes) and OEWS nonmetropolitan areas (7-digit codes). Occupations use SOC 2018 codes 'XX-XXXX'. "
+    "Missing or top-coded values are NULL (never 0) and named in suppressed_columns / topcoded_columns. "
+    "Typical flow: turn a job title into a SOC code with the occupation search, then filter the wage "
+    "estimates by that code and an area; a ZIP code can stand in for its metro area. The first wage query "
+    "for a release downloads the BLS file (about 80 MB, converted once into a local cache); the occupation "
+    "hierarchy and search use bundled data and need no network."
 )
 
 CATALOG_DOC_MD = (
-    "# VGI us_wages worker\n\n"
-    "**An example [VGI](https://query.farm/vgi) worker that brings custom functions into DuckDB "
-    "SQL.** It was generated from the Query.Farm starter template and is meant to be renamed and "
-    "rewritten: every function here demonstrates one pattern you will reuse, from vectorized "
-    "scalars and streaming table functions to a REST API reader that retries politely and reads "
-    "a bearer token from a DuckDB secret or the environment.\n\n"
-    "The worker speaks Apache Arrow to DuckDB over stdin/stdout, a Unix socket, or HTTP, so the "
-    "same code runs as a local subprocess or a hosted service. See the "
-    "[VGI documentation](https://query.farm/vgi/docs/) to learn more."
+    "# US Wages\n\n"
+    "Employment and pay for about 830 occupations across the US, every state, about 390 metropolitan areas "
+    "and 140 nonmetropolitan areas, from the Bureau of Labor Statistics "
+    "[Occupational Employment and Wage Statistics](https://www.bls.gov/oes/) (OEWS) survey. Each May "
+    "reference period is a *release*; the worker reads BLS's "
+    "[all-data files](https://www.bls.gov/oes/tables.htm), converts them once into a local Parquet cache "
+    "and filters them locally.\n\n"
+    "Occupations follow the [2018 Standard Occupational Classification](https://www.bls.gov/soc/2018/); "
+    "occupation search also covers the alternate job titles of the "
+    "[O*NET 31.0 database](https://www.onetcenter.org/database.html) (CC BY 4.0, by the U.S. Department of "
+    "Labor, Employment and Training Administration). The ZIP lookup uses the Census Bureau's "
+    "[2020 ZCTA relationship files](https://www.census.gov/geographies/reference-files/time-series/geo/"
+    "relationship-files.html) and gives *metro-level* figures, never ZIP-level ones.\n\n"
+    "BLS suppression and top-code markers become NULL plus a flag, never 0."
+)
+
+SCHEMA_COMMENT = (
+    "OEWS wage and employment estimates, the OEWS area list and ZIP lookup, the SOC 2018 occupation "
+    "hierarchy and occupation search, and cache management."
 )
 
 SCHEMA_DOC_LLM = (
-    "The `main` schema holds the starter template's example functions, one per common worker "
-    "pattern. `greet(name)` and `greet(name, style)` are vectorized scalars: use them inside a "
-    "projection or predicate, one result per row; `style` is a constant that must be 'casual' or "
-    "'formal'. `sequence_table(count, step := 1)` is a deterministic table function that returns "
-    "`count` rows of `(n, squared)`; use it for demos, tests, and as a template for generators. "
-    "`fetch_items(base_url, page_size := 100)` reads every item from a paginated JSON REST API as "
-    "`(id, name, category, price)` rows, streaming one page per batch, retrying rate-limited "
-    "requests, and authenticating with a `us_wages_api` DuckDB secret or the `US_WAGES_API_TOKEN` "
-    "environment variable. Scalars cannot take named arguments; table functions can."
+    "Everything lives in `main`. Wage estimates come from table functions with named arguments that filter "
+    "locally (occupation, area, area_type, state, industry, release); WHERE clauses on the result columns "
+    "are pushed down too. The default release is 'latest' (most recent May reference year); pass "
+    "release := '2024' for another year. Cross-industry rows are the default; industry := 'all' adds the "
+    "national industry (NAICS) breakdowns. SOC codes are `VARCHAR` 'XX-XXXX'; area codes are `VARCHAR` and "
+    "keep leading zeros; join metro rows to other data on cbsa_code and states on state_fips."
 )
 
 SCHEMA_DOC_MD = (
     "## main\n\n"
-    "The starter template's example functions, one per common worker pattern.\n\n"
-    "- **Scalars** answer one question per row and slot into a projection or predicate.\n"
-    "- **Table functions** return sets of rows, streamed to DuckDB in Arrow batches.\n"
-    "- **REST readers** page through an HTTP API and authenticate with a DuckDB secret."
+    "Wage estimates from the BLS [OEWS](https://www.bls.gov/oes/) survey, the areas they cover, and the "
+    "SOC 2018 occupations they are classified by.\n\n"
+    "- **Wages**: estimates by occupation, area and industry; a ZIP-to-metro shortcut.\n"
+    "- **Geography**: the OEWS areas of a release and the counties that make them up.\n"
+    "- **Occupations**: the SOC 2018 hierarchy and a title search with O*NET alternate titles.\n"
+    "- **Cache**: what has been downloaded, and a way to refresh it."
 )
 
 AGENT_TEST_TASKS = [
-    {"name": "formal_greeting", "prompt": "Using the us_wages worker, greet the name 'Grace' formally."},
     {
-        "name": "sum_of_squares",
-        "prompt": "Using the us_wages worker, what is the sum of the squared column for the first 10 rows "
-        "of the sequence with the default step?",
+        "name": "soc_major_groups",
+        "prompt": "Using the us_wages worker, how many SOC 2018 major occupation groups are there?",
     },
     {
-        "name": "stepped_sequence",
-        "prompt": "List the n values of a 4-row sequence that steps by 5, in ascending order.",
+        "name": "software_developer_code",
+        "prompt": "Using the us_wages worker's occupation search, what is the SOC code for software developers?",
     },
     {
-        "name": "items_per_category",
+        "name": "nurse_median_metro",
         "prompt": (
-            "The items API is running at https://vgi-starter-api.query-farm.services/v1. "
-            "How many items does it have in each category?"
+            "Using the us_wages worker, which metropolitan area has the highest annual median wage for "
+            "registered nurses in the latest release?"
         ),
+    },
+    {
+        "name": "zip_metro",
+        "prompt": "Using the us_wages worker, which OEWS metro area are wage figures for ZIP code 94103 taken from?",
+    },
+    {
+        "name": "metro_area_count",
+        "prompt": "Using the us_wages worker, how many metropolitan areas does the latest OEWS release cover?",
+    },
+    {
+        "name": "connecticut_regions",
+        "prompt": (
+            "Using the us_wages worker, how many Connecticut counties or county equivalents belong to the "
+            "Hartford metro area (CBSA 25540) in the latest area definitions?"
+        ),
+    },
+    {
+        "name": "cached_bundles",
+        "prompt": "Using the us_wages worker, how many bundled reference tables does it ship with?",
+    },
+    {
+        "name": "refresh_latest",
+        "prompt": "Using the us_wages worker, make sure the latest OEWS release is cached and report its year.",
     },
 ]
 
 CATALOG_TAGS = {
-    "vgi.title": "VGI UsWages Worker",
-    "vgi.subtitle": "Example DuckDB functions to rename and replace: a scalar, a table function and a REST API reader.",
+    "vgi.title": "US Occupational Wages",
+    "vgi.subtitle": "Occupational employment and wages for the US, states and metro areas, plus SOC occupations.",
     "vgi.doc_llm": CATALOG_DOC_LLM,
     "vgi.doc_md": CATALOG_DOC_MD,
     "vgi.source_url": SOURCE_URL,
     "vgi.icon_url": "https://query.farm/media-kit/products/vgi/vgi-logo.png",
     "vgi.license": "0BSD",
     "vgi.author": "Query.Farm",
-    "vgi.copyright": "Copyright 2026 Query.Farm LLC",
-    "vgi.keywords": keywords_array("vgi, duckdb, starter template, example worker, rest api, table function"),
+    "vgi.copyright": "Copyright 2026 Query Farm LLC - https://query.farm",
+    "vgi.keywords": keywords_array(
+        "wages, salaries, pay, occupations, employment, bls, oews, oes, soc, metro areas, cbsa, labor statistics"
+    ),
     "vgi.support_contact": f"{SOURCE_URL}/issues",
     "vgi.support_policy_url": f"{SOURCE_URL}#support",
-    # Public analyst tasks for `vgi-lint simulate`; private graders live in vgi-agent-tests.yaml.
     "vgi.agent_test_tasks": json.dumps(AGENT_TEST_TASKS),
 }

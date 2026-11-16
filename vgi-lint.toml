@@ -7,7 +7,7 @@
 location = ".venv/bin/vgi-us-wages-worker"
 
 # Fail on warnings while you build. Raise this to "info" before you publish the worker.
-fail_on = "warning"
+fail_on = "info"
 
 # Waive a finding only with a kind and a reason, so the waiver can be audited:
 #   domain-exemption  permanent and legitimate for this worker
@@ -17,6 +17,13 @@ fail_on = "warning"
 ignore = [
   # { code = "VGI146", kind = "domain-exemption", reason = "every entry point needs a key" },
 ]
+
+# Bound the execution probes: examples run against the trimmed slice of real BLS files in
+# test/fixtures/bls (laid out like bls.gov, read through the ordinary base_url option) and a
+# scratch cache, so linting never downloads the ~80 MB OEWS all-data zip.
+[attach_options]
+base_url = "test/fixtures/bls"
+cache_dir = ".tools/lint-cache"
 
 # Adopting the gate on a worker that already has findings? Record them once with
 #   vgi-lint lint --baseline vgi-lint-baseline --update-baseline

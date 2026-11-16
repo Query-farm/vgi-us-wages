@@ -22,14 +22,19 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 
 ```
 src/us_wages_worker/
-  worker.py        # assembles the catalog; add new functions to FUNCTIONS
+  worker.py        # assembles the catalog + ATTACH options; add new functions to FUNCTIONS
   meta.py          # catalog/schema metadata + helpers (object_tags, column)
-  greet.py         # scalar example (overloads, ConstParam choices)
-  sequence.py      # table function example (named args, streaming state)
-  fetch_items.py   # REST API table function (pagination, retries, secrets)
+  common.py        # ATTACH options, polite fetching (http or local dir), cache locks
+  oews.py          # OEWS release discovery, download, xlsx -> Parquet conversion
+  wage_rows.py     # filters/pushdown, row-group pruning, derived columns
+  wages.py         # wages, wages_for_zip, areas, area_counties
+  catalog_fns.py   # occupations/cache_info tables, search_occupations, refresh
+  reference.py     # bundled SOC/O*NET/ZCTA tables and title search
+  data/            # bundled Parquet (see DATA-SOURCES.md; rebuild: scripts/build_reference.py)
 tests/             # pytest unit tests (in-process client)
-test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/sql/          # sqllogictest files run through DuckDB against test/fixtures/bls
+test/fixtures/bls/ # trimmed real BLS files laid out like bls.gov (scripts/make_fixtures.py)
+test/mock_api/     # starter mock API; ci/run-integration.sh still starts it (unused here)
 examples/          # recipes: pushdown, caching, catalog tables, aggregates, COPY …
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)

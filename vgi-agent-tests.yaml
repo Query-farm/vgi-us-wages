@@ -1,16 +1,30 @@
 # Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
-# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql/reference_sql.
 # See https://github.com/Query-farm/vgi-lint-check (VGI920).
 tasks:
-  - name: formal_greeting
-    reference_sql: SELECT us_wages.main.greet('Grace', 'formal') AS greeting
-  - name: sum_of_squares
-    reference_sql: SELECT sum(squared) AS total FROM us_wages.main.sequence_table(10)
-  - name: stepped_sequence
-    reference_sql: SELECT n FROM us_wages.main.sequence_table(4, step := 5) ORDER BY n
-  # Reads the public demo API (https://vgi-starter-api.query-farm.services/v1).
-  - name: items_per_category
+  # Bundled SOC 2018 data: deterministic.
+  - name: soc_major_groups
+    reference_sql: SELECT count(*) AS major_groups FROM us_wages.main.occupations() WHERE soc_level = 'major'
+  - name: software_developer_code
     check_sql: >-
-      SELECT count(*) = 3 AND sum(items) = 25
-      FROM (SELECT category, count(*) AS items
-            FROM us_wages.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') GROUP BY category)
+      SELECT soc_code = '15-1252' FROM us_wages.main.search_occupations('software developer') WHERE rank = 1
+  # Live OEWS data changes every release, so grade with check_sql against the same data.
+  - name: nurse_median_metro
+    check_sql: >-
+      SELECT count(*) = 1 FROM (
+        SELECT area_code FROM us_wages.main.wages(occupation := '29-1141', area_type := 'metro')
+        WHERE a_median IS NOT NULL ORDER BY a_median DESC LIMIT 1)
+  - name: zip_metro
+    check_sql: >-
+      SELECT bool_and(area_code = '41860') FROM us_wages.main.wages_for_zip('94103', '00-0000')
+  - name: metro_area_count
+    check_sql: >-
+      SELECT count(*) > 0 FROM us_wages.main.areas() WHERE area_type_name = 'metro'
+  - name: connecticut_regions
+    check_sql: >-
+      SELECT count(*) > 0 FROM us_wages.main.area_counties() WHERE area_code = '25540' AND state_abbr = 'CT'
+  - name: cached_bundles
+    reference_sql: SELECT count(*) AS bundled_tables FROM us_wages.main.cache_info WHERE kind = 'bundled'
+  - name: refresh_latest
+    check_sql: >-
+      SELECT count(*) > 0 FROM us_wages.main.refresh() WHERE kind = 'oews_release'

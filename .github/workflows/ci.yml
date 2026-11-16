@@ -69,13 +69,16 @@ jobs:
           export WORKER="$bin/vgi-us-wages-worker$exe"
           export HAYBARN_UNITTEST="$tools/haybarn-unittest$exe"
           export RECIPES_WORKER="$bin/python$exe $PWD/examples/run.py"
+          # The SQL tests read trimmed real BLS files through the worker's base_url option.
+          export US_WAGES_FIXTURES="$PWD/test/fixtures/bls" US_WAGES_CACHE="$RUNNER_TEMP/us-wages-cache"
           if [ "$RUNNER_OS" = "Windows" ]; then
             # Native python.exe can't open MSYS paths (/d/a/...), and MSYS rewrites
             # path-like env vars it passes to native programs (mangling "D:/a" into
             # "D;A:\"). Hand over Windows paths and exclude the variable from rewriting.
             winbin="$(cygpath -m "$bin")"; winroot="$(cygpath -m "$PWD")"
             RECIPES_WORKER="$winbin/python.exe $winroot/examples/run.py"
-            export MSYS2_ENV_CONV_EXCL=RECIPES_WORKER
+            US_WAGES_FIXTURES="$winroot/test/fixtures/bls"; US_WAGES_CACHE="$(cygpath -m "$RUNNER_TEMP")/us-wages-cache"
+            export MSYS2_ENV_CONV_EXCL="RECIPES_WORKER;US_WAGES_FIXTURES;US_WAGES_CACHE"
           fi
           TRANSPORT=${{ matrix.transport }} PYTHON="uv run --no-project python" ci/run-integration.sh
 
@@ -96,7 +99,7 @@ jobs:
           location: ${{ github.workspace }}/.venv/bin/vgi-us-wages-worker
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
+          # Examples execute against test/fixtures/bls via [attach_options] in vgi-lint.toml.
           execute: true
 
   docker:

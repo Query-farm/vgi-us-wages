@@ -11,7 +11,7 @@ HAYBARN_UNITTEST := $(TOOLS)/bin/haybarn-unittest
 TRANSPORT       ?= stdio
 
 .DEFAULT_GOAL := help
-.PHONY: help build test test-unit test-sql test-sql-all lint lint-explain lint-ai fmt check run run-http debug tools template-diff clean
+.PHONY: live-check help build test test-unit test-sql test-sql-all lint lint-explain lint-ai fmt check run run-http debug tools template-diff clean
 
 help: ## List the targets
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  %-14s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -37,7 +37,8 @@ test-unit: build ## Unit tests (pytest)
 	uv run pytest -q
 
 test-sql: build tools ## SQL tests through DuckDB: make test-sql TRANSPORT=stdio|launch|http
-	WORKER=$(WORKER) RECIPES_WORKER="$(CURDIR)/.venv/bin/python $(CURDIR)/examples/run.py" HAYBARN_UNITTEST=$(HAYBARN_UNITTEST) TRANSPORT=$(TRANSPORT) PYTHON="uv run --no-project python" ci/run-integration.sh
+	rm -rf $(TOOLS)/sql-cache-$(TRANSPORT)
+	US_WAGES_FIXTURES=$(CURDIR)/test/fixtures/bls US_WAGES_CACHE=$(TOOLS)/sql-cache-$(TRANSPORT) WORKER=$(WORKER) RECIPES_WORKER="$(CURDIR)/.venv/bin/python $(CURDIR)/examples/run.py" HAYBARN_UNITTEST=$(HAYBARN_UNITTEST) TRANSPORT=$(TRANSPORT) PYTHON="uv run --no-project python" ci/run-integration.sh
 
 test-sql-all: ## SQL tests over every transport
 	$(MAKE) test-sql TRANSPORT=stdio
@@ -52,6 +53,10 @@ lint-explain: build ## Metadata quality report (vgi-lint, settings in vgi-lint.t
 lint-ai: ## Opt-in L3 check: an agent runs vgi-agent-tests.yaml and docs are reviewed (needs the claude CLI)
 	@$(MAKE) --no-print-directory lint-explain LINT_ARGS="--ai $(LINT_ARGS)"
 
+live-check: build ## Opt-in: query real bls.gov data (downloads ~80 MB into .tools/live-cache); not part of check
+	@printf "LOAD vgi;\nATTACH 'us_wages' (TYPE vgi, LOCATION '$(WORKER)', cache_dir '$(TOOLS)/live-cache');\n" | cat - test/live/live_check.sql \
+	  | uvx --from haybarn-cli==$(HAYBARN_VERSION) haybarn -no-agent
+
 check: lint test-unit test-sql-all lint-explain ## Everything CI runs. Done = this passes.
 
 run: build ## Serve over stdio (what DuckDB launches)
@@ -61,7 +66,7 @@ run-http: build ## Serve over HTTP on port 8000
 	$(WORKER) --http --host 127.0.0.1 --port 8000
 
 debug: build tools ## Run one query against the worker with debug logging on stderr
-	@printf "LOAD vgi;\nATTACH 'us_wages' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT us_wages.main.greet('debug');\n" \
+	@printf "LOAD vgi;\nATTACH 'us_wages' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT count(*) FROM us_wages.main.occupations;\n" \
 	  | uvx --from haybarn-cli==$(HAYBARN_VERSION) haybarn -no-agent
 
 template-diff: ## Show upstream template changes since this project was created

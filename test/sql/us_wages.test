@@ -1,148 +1,279 @@
 # name: test/sql/us_wages.test
-# description: SQL-level tests for the us_wages worker, run through DuckDB by ci/run-integration.sh
+# description: SQL-level tests for the us_wages worker against a trimmed slice of real BLS OEWS files
 # group: [us_wages]
-# managed-by: vgi-starters (edit upstream in shared/, then run tools/render.py)
 
 require vgi
 
 require-env US_WAGES_WORKER
 
-require-env US_WAGES_MOCK_API
+require-env US_WAGES_FIXTURES
 
-require-env US_WAGES_MOCK_API_AUTH
+require-env US_WAGES_CACHE
 
+# The fixtures mirror bls.gov's layout, so the worker reads them through its ordinary
+# base_url option; cache_dir is a scratch directory the Makefile empties first.
 statement ok
-ATTACH 'us_wages' (TYPE vgi, LOCATION '{US_WAGES_WORKER}');
+ATTACH 'us_wages' (TYPE vgi, LOCATION '{US_WAGES_WORKER}', base_url '{US_WAGES_FIXTURES}', cache_dir '{US_WAGES_CACHE}');
 
-# ---------------------------------------------------------------- greet (scalar)
+# ------------------------------------------------------------------ wages
 
-query T
-SELECT us_wages.main.greet('Ada');
+# 'latest' resolves from the (fixture) tables page to May 2025.
+query IITT
+SELECT min(release_year), count(*), min(topcode_annual)::VARCHAR, min(topcode_hourly)::VARCHAR FROM us_wages.main.wages();
 ----
-Hi, Ada!
+2025	644	239200.0	115.0
 
-query T
-SELECT us_wages.main.greet('Ada', 'formal');
+# Named-argument pushdown: one occupation across metro areas, CBSA codes as join keys.
+query TTTI
+SELECT area_code, cbsa_code, area_type_name, a_median::BIGINT
+FROM us_wages.main.wages(occupation := '29-1141', area_type := 'metro')
+ORDER BY area_code;
 ----
-Good day, Ada.
+12420	12420	metro	97890
+14460	14460	metro	106180
+14860	14860	metro	105660
+25540	25540	metro	101470
+31080	31080	metro	135560
+35620	35620	metro	119720
+41860	41860	metro	186610
 
-# NULL in, NULL out.
-query T
-SELECT us_wages.main.greet(NULL);
+# WHERE pushdown on base and derived columns gives the same answer as the named arguments.
+query TI
+SELECT area_code, tot_emp FROM us_wages.main.wages()
+WHERE occ_code = '29-1141' AND cbsa_code IN ('41860', '35620') ORDER BY area_code;
 ----
-NULL
+35620	197740
+41860	41750
 
-# Works over a whole column, one result per row.
-query T
-SELECT us_wages.main.greet(name) FROM (VALUES ('Ada'), ('Grace'), (NULL)) AS t(name) ORDER BY ALL NULLS LAST;
+# Occupation prefix + state filter: California's own row plus its metro and nonmetro areas.
+query TTT
+SELECT DISTINCT area_code, area_type_name, state_fips FROM us_wages.main.wages(occupation := '15-125', state := 'CA')
+ORDER BY area_code;
 ----
-Hi, Ada!
-Hi, Grace!
-NULL
+06	state	06
+0600007	nonmetro	06
+31080	metro	06
+41860	metro	06
 
-# `style` is constrained to 'casual' | 'formal' and checked when the query is bound.
-# (No expected message: each SDK words constraint errors its own way.)
-statement error
-SELECT us_wages.main.greet('Ada', 'loud');
+# Codes keep their leading zeros and are VARCHAR.
+query TT
+SELECT typeof(area_code), typeof(occ_code) FROM us_wages.main.wages(area := '06') LIMIT 1;
 ----
-<REGEX>:.*
+VARCHAR	VARCHAR
 
-# ------------------------------------------------------ sequence_table (table fn)
-
-query II
-SELECT n, squared FROM us_wages.main.sequence_table(4) ORDER BY n;
-----
-0	0
-1	1
-2	4
-3	9
-
-# Named argument with a default.
+# Top-coded ('#') values are NULL plus a flag, never 0.
 query I
-SELECT n FROM us_wages.main.sequence_table(3, step := 5) ORDER BY n;
-----
-0
-5
-10
-
-# Larger than one batch: the cursor must carry across process calls.
-query II
-SELECT count(*), max(n) FROM us_wages.main.sequence_table(25000);
-----
-25000	24999
-
-query I
-SELECT count(*) FROM us_wages.main.sequence_table(0);
+SELECT count(*) FROM us_wages.main.wages() WHERE len(topcoded_columns) > 0 AND (a_pct90 = 0 OR a_pct90 IS NOT NULL AND list_contains(topcoded_columns, 'a_pct90'));
 ----
 0
 
-# count is constrained to [0, 1000000].
+query I
+SELECT count(*) > 0 FROM us_wages.main.wages() WHERE list_contains(topcoded_columns, 'a_pct90') AND a_pct90 IS NULL;
+----
+true
+
+# Suppressed ('*', '**') values are NULL plus a flag.
+query I
+SELECT count(*) > 0 FROM us_wages.main.wages() WHERE list_contains(suppressed_columns, 'tot_emp') AND tot_emp IS NULL;
+----
+true
+
+query I
+SELECT count(*) FROM us_wages.main.wages() WHERE tot_emp = 0 OR a_median = 0 OR h_median = 0;
+----
+0
+
+# Annual-only occupations (teachers) have NULL hourly wages.
+query TTI
+SELECT annual_only::VARCHAR, (h_median IS NULL)::VARCHAR, a_median::BIGINT FROM us_wages.main.wages(occupation := '25-2021', area := '99');
+----
+true	true	63970
+
+# Industry rows only appear when asked for.
+query I
+SELECT count(*) FROM us_wages.main.wages() WHERE i_group <> 'cross-industry';
+----
+0
+
+query I
+SELECT count(*) > 10 FROM us_wages.main.wages(industry := 'all', occupation := '15-1252') WHERE i_group = 'sector';
+----
+true
+
+query I
+SELECT count(*) > 0 FROM us_wages.main.wages(industry := 'all') WHERE pct_rpt_below_half AND pct_rpt IS NULL;
+----
+true
+
+# Bad arguments are rejected at bind.
 statement error
-SELECT * FROM us_wages.main.sequence_table(-1);
+SELECT * FROM us_wages.main.wages(area_type := 'county');
 ----
 <REGEX>:.*
 
-# Named arguments are constrained too: step >= 1.
 statement error
-SELECT * FROM us_wages.main.sequence_table(3, step := 0);
+SELECT * FROM us_wages.main.wages(release := 'May 2024');
 ----
 <REGEX>:.*
 
-# ------------------------------------------------- fetch_items (REST table fn)
-
-query IIT
-SELECT count(*), sum(id), min(name) FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API}', page_size := 4);
+statement error
+SELECT * FROM us_wages.main.wages(state := 'ZZ');
 ----
-25	325	item-01
+<REGEX>:.*unknown state.*
+
+# A release BLS never published fails clearly.
+statement error
+SELECT * FROM us_wages.main.wages(release := '2005');
+----
+<REGEX>:.*2011.*
+
+# ------------------------------------------------- older release: New England NECTAs
+
+query TTT
+SELECT area_code, coalesce(cbsa_code, '-'), is_necta::VARCHAR FROM us_wages.main.wages(occupation := '00-0000', release := '2023')
+WHERE area_type = 4 ORDER BY area_code;
+----
+41860	41860	false
+71650	-	true
+73450	-	true
+
+# ------------------------------------------------------------- wages_for_zip
+
+query TTTTRT
+SELECT zip, area_code, cbsa_code, estimate_geography, zcta_land_share, is_primary_area::VARCHAR
+FROM us_wages.main.wages_for_zip('94103', '15-1252');
+----
+94103	41860	41860	metro-level estimate (not ZIP-level)	1.0	true
+
+# Connecticut ZIPs go through the 2022 planning regions.
+query TT
+SELECT area_code, list_sort(counties)::VARCHAR FROM us_wages.main.wages_for_zip('06103', '00-0000');
+----
+25540	[09110]
+
+# A ZIP straddling two areas: primary by default, both with all_areas := true.
+query TTR
+SELECT area_code, area_type_name, zcta_land_share FROM us_wages.main.wages_for_zip('06076', '00-0000', all_areas := true)
+ORDER BY zcta_land_share DESC;
+----
+25540	metro	0.675259
+0900001	nonmetro	0.324741
+
+query I
+SELECT count(*) FROM us_wages.main.wages_for_zip('06076', '00-0000');
+----
+1
+
+statement error
+SELECT * FROM us_wages.main.wages_for_zip('00000', '00-0000');
+----
+<REGEX>:.*ZCTA.*
+
+statement error
+SELECT * FROM us_wages.main.wages_for_zip('94103', '00-0000', release := '2023');
+----
+<REGEX>:.*2024.*
+
+# ----------------------------------------------------------- areas / counties
 
 query TI
-SELECT category, count(*) FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API}') GROUP BY category ORDER BY category;
+SELECT area_type_name, count(*) FROM us_wages.main.areas() GROUP BY ALL ORDER BY ALL;
 ----
-hardware	8
-service	8
-software	9
+metro	7
+national	1
+nonmetro	4
+state	5
+territory	2
 
-# The harness runs US_WAGES_MOCK_API with MOCK_API_FLAKY=1: every page answers
-# 429 + Retry-After once, so every query above also exercised the retry path.
-
-# US_WAGES_MOCK_API_AUTH requires a bearer token ('test-token'). Every language's
-# fetch_items must put the HTTP status code in its error message.
-statement error
-SELECT count(*) FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API_AUTH}');
+query TIT
+SELECT area_code, county_count, states::VARCHAR FROM us_wages.main.areas() WHERE area_code IN ('14460', '09') ORDER BY area_code;
 ----
-401
+09	9	[CT]
+14460	7	[MA, NH]
 
-statement ok
-CREATE SECRET us_wages_api_test (TYPE us_wages_api, TOKEN 'test-token');
+query TTT
+SELECT county_fips, area_code, coalesce(cbsa_code, '-') FROM us_wages.main.area_counties()
+WHERE state_abbr = 'CT' ORDER BY county_fips LIMIT 3;
+----
+09110	25540	25540
+09120	14860	14860
+09130	25540	25540
 
 query I
-SELECT count(*) FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API_AUTH}', page_size := 25);
+SELECT count(*) FROM us_wages.main.area_counties();
 ----
-25
+3222
 
-# Several pages: the token must survive between batches (over HTTP each batch is a
-# separate request, so a token kept only in memory is lost after page 1).
+# ------------------------------------------------------- occupations / search
+
+query TI
+SELECT soc_level, count(*) FROM us_wages.main.occupations GROUP BY ALL ORDER BY 2;
+----
+major	23
+minor	98
+broad	459
+detailed	867
+
+query TTT
+SELECT soc_code, broad_code, onet_soc_codes::VARCHAR FROM us_wages.main.occupations WHERE soc_code = '29-1141';
+----
+29-1141	29-1140	[29-1141.00, 29-1141.01, 29-1141.02, 29-1141.03, 29-1141.04]
+
+query TT
+SELECT soc_code, match_source FROM us_wages.main.search_occupations('barista', max_results := 1);
+----
+35-3023	onet_title
+
+query T
+SELECT soc_code FROM us_wages.main.search_occupations('Software Developers') WHERE rank = 1;
+----
+15-1252
+
 query I
-SELECT count(*) FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API_AUTH}', page_size := 7);
+SELECT count(*) FROM us_wages.main.search_occupations('zzzxqv');
 ----
-25
+0
 
+# Join search -> wages, the intended flow.
+query TI
+SELECT w.occ_code, w.a_median::BIGINT
+FROM us_wages.main.search_occupations('registered nurse', max_results := 1) s
+JOIN us_wages.main.wages(area := '99') w ON w.occ_code = s.soc_code;
+----
+29-1141	97550
+
+# --------------------------------------------------------------- cache
+
+query TI
+SELECT kind, count(*) FROM us_wages.main.cache_info GROUP BY ALL ORDER BY ALL;
+----
+area_definitions	1
+bundled	4
+latest_pointer	1
+oews_release	2
+
+query T
+SELECT sha256 IS NOT NULL AND rows = 693 FROM us_wages.main.cache_info WHERE kind = 'oews_release' AND release_year = 2025;
+----
+true
+
+query TI
+SELECT kind, release_year FROM us_wages.main.refresh(release := '2025') ORDER BY kind;
+----
+area_definitions	2025
+oews_release	2025
+
+# offline mode with an empty cache: no download, a clear error.
 statement ok
-DROP SECRET us_wages_api_test;
-
-# base_url must be http(s).
-statement error
-SELECT * FROM us_wages.main.fetch_items('ftp://example.com');
-----
-<REGEX>:.*
-
-# page_size is a named argument constrained to [1, 1000].
-statement error
-SELECT * FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API}', page_size := 0);
-----
-<REGEX>:.*
+ATTACH 'us_wages' AS offline_wages (TYPE vgi, LOCATION '{US_WAGES_WORKER}', base_url '{US_WAGES_FIXTURES}', cache_dir '{US_WAGES_CACHE}/empty', offline true);
 
 statement error
-SELECT * FROM us_wages.main.fetch_items('{US_WAGES_MOCK_API}', page_size := 5000);
+SELECT * FROM offline_wages.main.wages();
 ----
-<REGEX>:.*
+<REGEX>:.*offline.*
+
+# offline still serves bundled data.
+query I
+SELECT count(*) FROM offline_wages.main.occupations;
+----
+1447
