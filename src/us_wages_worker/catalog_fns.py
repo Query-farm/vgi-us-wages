@@ -422,10 +422,13 @@ class CacheInfo(TableFunctionGenerator[NoArgs, None]):
         examples = [
             FunctionExample(
                 sql=(
-                    "SELECT release_year, bytes, source_url, fetched_at FROM us_wages.main.cache_info "
-                    "WHERE kind = 'oews_release' ORDER BY release_year"
+                    "SELECT kind, path, release_year, bytes, fetched_at FROM us_wages.main.cache_info "
+                    "ORDER BY kind, path"
                 ),
-                description="Which OEWS releases are cached locally, and when they were fetched",
+                description=(
+                    "Everything the worker holds locally: bundled reference tables, plus any OEWS releases "
+                    "downloaded so far and when they were fetched"
+                ),
             ),
             FunctionExample(
                 sql="SELECT kind, count(*) AS entries FROM us_wages.main.cache_info GROUP BY kind ORDER BY kind",
