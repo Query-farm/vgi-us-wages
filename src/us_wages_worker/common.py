@@ -260,7 +260,7 @@ def read_json(path: Path) -> dict[str, Any] | None:
     """Read a JSON sidecar, or None when it is missing or unreadable."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     return data if isinstance(data, dict) else None
 
