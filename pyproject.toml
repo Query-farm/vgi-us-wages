@@ -1,6 +1,6 @@
 [project]
 name = "vgi-us-wages-worker"
-version = "0.1.1"
+version = "0.1.2"
 description = "US occupational employment and wages (BLS OEWS), SOC occupations and ZIP-to-metro lookups as DuckDB SQL functions."
 readme = "README.md"
 license = "0BSD"
@@ -10,7 +10,7 @@ dependencies = [
     # [http] adds the HTTP transport (`--http`) used by Docker deploys.
     # SDK bumps go through the template (minor bumps can raise the protocol).
     # [haybarn] lets the SDK evaluate the WHERE filters DuckDB pushes into wages().
-    "vgi-python[http,haybarn]>=0.51.1,<0.52",
+    "vgi-python[http,haybarn]>=0.52.2,<0.53",
     # Reads the BLS OEWS .xlsx files (and SOC workbooks) without openpyxl's memory cost.
     "python-calamine>=0.4",
     "platformdirs>=4.3",
@@ -23,7 +23,7 @@ vgi-us-wages-worker = "us_wages_worker.worker:main"
 dev = [
     # The pushdown recipe evaluates predicates locally; a worker that uses filter
     # pushdown must add the `haybarn` extra to its own dependencies.
-    "vgi-python[haybarn]>=0.51.1,<0.52",
+    "vgi-python[haybarn]>=0.52.2,<0.53",
     "pytest>=8.4",
     "mypy>=1.18",
     "ruff>=0.14",
