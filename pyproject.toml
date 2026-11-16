@@ -1,6 +1,6 @@
 [project]
 name = "vgi-us-wages-worker"
-version = "0.1.0"
+version = "0.1.1"
 description = "US occupational employment and wages (BLS OEWS), SOC occupations and ZIP-to-metro lookups as DuckDB SQL functions."
 readme = "README.md"
 license = "0BSD"

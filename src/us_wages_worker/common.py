@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -179,6 +180,8 @@ def download(opts: Options, rel: str, target: Path) -> Fetched:
     url = source_url(opts, rel)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f"{target.name}.{os.getpid()}.part")
+    for stale in target.parent.glob(f"{target.name}.*.part"):  # left by a killed process; callers hold file_lock
+        stale.unlink(missing_ok=True)
     digest = hashlib.sha256()
     size = 0
     etag: str | None
@@ -210,27 +213,47 @@ def download(opts: Options, rel: str, target: Path) -> Fetched:
 
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
-    """Cross-process lock (portable: an O_EXCL lock file, stale after LOCK_WAIT_SECONDS)."""
+    """Cross-process exclusive lock held by the operating system.
+
+    The OS releases it when the holder exits, even if the process is killed, so an
+    interrupted download never leaves the next query waiting on a stale lock file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
-    while True:
+    with open(path, "a+b") as handle:
+        while True:
+            try:
+                _lock_nowait(handle.fileno())
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"timed out waiting for {path}") from None
+                time.sleep(0.25)
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            break
-        except FileExistsError:
-            with contextlib.suppress(FileNotFoundError):
-                if time.time() - path.stat().st_mtime > LOCK_WAIT_SECONDS:
-                    path.unlink(missing_ok=True)
-                    continue
-            if time.monotonic() > deadline:
-                raise TimeoutError(f"timed out waiting for {path}") from None
-            time.sleep(0.25)
-    try:
-        yield
-    finally:
-        path.unlink(missing_ok=True)
+            yield
+        finally:
+            _unlock(handle.fileno())
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_nowait(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_nowait(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
