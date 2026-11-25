@@ -28,6 +28,8 @@ SELECT area_title, estimate_geography, a_pct25, a_median, a_pct75
 FROM us_wages.main.wages_for_zip('78701', '35-3023');
 ```
 
+vgi-us-wages 0.2.0 speaks VGI protocol 3.4, so it needs Haybarn 2.0.1 or newer (Haybarn 2.0.0 loads a 3.3 `vgi` extension that cannot attach it).
+
 ## Install and attach
 
 Requires [uv](https://docs.astral.sh/uv/) and DuckDB 2.0 (or [Haybarn](https://query.farm/products/haybarn) 2.0).
@@ -40,7 +42,7 @@ INSTALL vgi FROM query_farm;
 LOAD vgi FROM query_farm;
 
 ATTACH 'us_wages' (TYPE vgi,
-  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-us-wages@v0.1.2 vgi-us-wages-worker');
+  LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-us-wages@v0.2.0 vgi-us-wages-worker');
 ```
 
 From a checkout: `make build`, then
